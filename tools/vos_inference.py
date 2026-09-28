@@ -7,6 +7,7 @@
 import argparse
 import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -221,6 +222,40 @@ def vos_inference(
     os.makedirs(os.path.join(output_mask_dir, video_name), exist_ok=True)
     output_palette = input_palette or DAVIS_PALETTE
     video_segments = {}  # video_segments contains the per-frame segmentation results
+    if not per_obj_png_file and os.environ.get("SAM2_OPT_3", "1") != "0":
+        label_maps = {}
+        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
+            inference_state
+        ):
+            label = torch.zeros(
+                (height, width), dtype=torch.uint8, device=out_mask_logits.device
+            )
+            for i, out_obj_id in sorted(
+                enumerate(out_obj_ids), key=lambda t: t[1], reverse=True
+            ):
+                label.masked_fill_(
+                    out_mask_logits[i].reshape(height, width) > score_thresh, out_obj_id
+                )
+            label_maps[out_frame_idx] = label
+        frame_inds = sorted(label_maps)
+        labels = torch.stack([label_maps[i] for i in frame_inds]).cpu().numpy()
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+            list(
+                pool.map(
+                    lambda j: save_ann_png(
+                        os.path.join(
+                            output_mask_dir,
+                            video_name,
+                            f"{frame_names[frame_inds[j]]}.png",
+                        ),
+                        labels[j],
+                        output_palette,
+                    ),
+                    range(len(frame_inds)),
+                )
+            )
+        return
+
     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
         inference_state
     ):

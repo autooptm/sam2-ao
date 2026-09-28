@@ -264,6 +264,26 @@ def load_video_frames_from_jpg_images(
         )
         return lazy_images, lazy_images.video_height, lazy_images.video_width
 
+    if not offload_video_to_cpu and os.environ.get("SAM2_OPT_2", "1") != "0":
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _decode(path):
+            img_pil = Image.open(path)
+            arr = np.array(img_pil.convert("RGB").resize((image_size, image_size)))
+            if arr.dtype != np.uint8:
+                raise RuntimeError(f"Unknown image dtype: {arr.dtype} on {path}")
+            return torch.from_numpy(arr), img_pil.size
+
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+            decoded = list(pool.map(_decode, img_paths))
+        video_width, video_height = decoded[0][1]
+        images = torch.stack([d[0] for d in decoded]).pin_memory()
+        images = images.to(compute_device, non_blocking=True)
+        images = images.permute(0, 3, 1, 2).float().div_(255.0)
+        images -= img_mean.to(compute_device)
+        images /= img_std.to(compute_device)
+        return images, video_height, video_width
+
     images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
     for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (JPEG)")):
         images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)

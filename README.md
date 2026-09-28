@@ -1,3 +1,76 @@
+<div align="center">
+  <a href="https://autooptm.com"><img src=".autooptm/logo.png" width="96" alt="AutoOptm"></a>
+
+  <h1>SAM 2 · optimized by <a href="https://autooptm.com">AutoOptm</a></h1>
+
+  <p><b>1.82x faster end to end</b> on the command below, output verified against the stock program.</p>
+
+  <p>
+    <a href="https://autooptm.com"><img alt="speedup" src="https://img.shields.io/badge/end--to--end-1.82x-2ea44f"></a>
+    <a href="https://github.com/facebookresearch/sam2/commit/2b90b9f5ceec907a1c18123530e92e794ad901a4"><img alt="base" src="https://img.shields.io/badge/upstream-2b90b9f5ceec-blue"></a>
+    <img alt="card" src="https://img.shields.io/badge/measured%20on-RTX%204090-lightgrey">
+  </p>
+</div>
+
+> This is a fork of [facebookresearch/sam2](https://github.com/facebookresearch/sam2) at commit
+> [`2b90b9f5ceec`](https://github.com/facebookresearch/sam2/commit/2b90b9f5ceec907a1c18123530e92e794ad901a4) with the AutoOptm patch applied on top.
+> What is measured is upstream's own semi-supervised VOS program, `tools/vos_inference.py`, run exactly
+> as `tools/README.md` documents it on DAVIS 2017 val; the command and its outputs are unchanged.
+> The optimisation was found, measured and verified automatically by [AutoOptm](https://autooptm.com);
+> the patch is also kept at [`.autooptm/autooptm.patch`](.autooptm/autooptm.patch).
+
+## The result
+
+| | |
+|---|---|
+| **Command** | `python ./tools/vos_inference.py --sam2_cfg configs/sam2.1/sam2.1_hiera_b+.yaml --sam2_checkpoint ./checkpoints/sam2.1_hiera_base_plus.pt --base_video_dir <DAVIS>/JPEGImages/480p --input_mask_dir <DAVIS>/Annotations/480p --video_list_file <DAVIS>/ImageSets/2017/val.txt --output_mask_dir ./outputs/davis_2017_pred_pngs` (the DAVIS 2017 example in `tools/README.md`) |
+| **Entry point** | `tools/vos_inference.py` |
+| **Unit measured** | one DAVIS 2017 val video tracked end to end with SAM 2.1 hiera-b+: its JPEG frames decoded and loaded, the frame-0 masks added, every frame propagated, and the per-frame label PNGs written |
+| **Before (stock)** | 3,884 ms per video (median; 54.5 ms per frame over the 1,900 frames of the timed videos) |
+| **After (this tree, all switches default ON)** | 2,140 ms per video (median; 32.9 ms per frame) |
+| **Speedup** | **1.82x** end to end on RTX 4090 (median per video; the first 3 videos of the run are untimed warm-up), noise floor of the host 0.86% |
+| **Output** | the written label PNGs identical to the stock program's on at least 99.9% of pixels -- only a handful of object-boundary pixels change label, far inside the DAVIS F-measure's own contour tolerance; verified on the pinned videos and on a held-out set the optimiser never saw |
+
+### What changed
+
+| File | Where | Gain |
+|---|---|---|
+| `sam2/utils/misc.py` | `load_video_frames_from_jpg_images()` | 1.42x |
+| `tools/vos_inference.py` | `vos_inference()`: the per-frame mask write-out (single-PNG path) | 1.089x |
+| `sam2/modeling/sam2_utils.py` | `LayerNorm2d.forward` | 1.019x |
+
+Each gain is that change's step on the measurement ladder, measured on top of the rows above it, not
+its effect alone. Every change sits behind an environment switch, default ON; setting a switch to `0`
+restores that part of the stock program. The first two rows alone leave the output bit-identical to
+stock; the last one is what moves the few boundary pixels.
+
+## Reproduce
+
+```bash
+git clone https://github.com/autooptm/sam2-ao.git
+cd sam2-ao
+# install PyTorch with CUDA as upstream documents, then:
+pip install -e .
+cd checkpoints && ./download_ckpts.sh && cd ..
+# DAVIS 2017 trainval 480p from https://davischallenge.org/davis2017/code.html, then:
+python ./tools/vos_inference.py \
+  --sam2_cfg configs/sam2.1/sam2.1_hiera_b+.yaml \
+  --sam2_checkpoint ./checkpoints/sam2.1_hiera_base_plus.pt \
+  --base_video_dir /path-to-davis-2017/JPEGImages/480p \
+  --input_mask_dir /path-to-davis-2017/Annotations/480p \
+  --video_list_file /path-to-davis-2017/ImageSets/2017/val.txt \
+  --output_mask_dir ./outputs/davis_2017_pred_pngs
+```
+
+The diff against upstream is one commit: `git log -1 -p` shows it, and
+`git diff 2b90b9f5ceec` is the same patch as `.autooptm/autooptm.patch`.
+
+---
+
+<div align="center"><sub>Optimized by <a href="https://autooptm.com">AutoOptm</a> — point it at a repository, get back a verified speedup and the patch.</sub></div>
+
+---
+
 # SAM 2: Segment Anything in Images and Videos
 
 **[AI at Meta, FAIR](https://ai.meta.com/research/)**

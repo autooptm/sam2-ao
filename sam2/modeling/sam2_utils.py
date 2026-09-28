@@ -6,6 +6,7 @@
 
 
 import copy
+import os
 from typing import Tuple
 
 import numpy as np
@@ -136,6 +137,9 @@ class MLP(nn.Module):
         return x
 
 
+_OPT_4 = os.environ.get("SAM2_OPT_1", "1") != "0"
+
+
 # From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
 # Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
 class LayerNorm2d(nn.Module):
@@ -146,6 +150,9 @@ class LayerNorm2d(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if _OPT_4:
+            y = F.layer_norm(x.permute(0, 2, 3, 1), (x.shape[1],), self.weight, self.bias, self.eps)
+            return y.permute(0, 3, 1, 2).to(x.dtype)
         u = x.mean(1, keepdim=True)
         s = (x - u).pow(2).mean(1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.eps)

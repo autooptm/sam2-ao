@@ -1,0 +1,116 @@
+diff --git a/sam2/modeling/sam2_utils.py b/sam2/modeling/sam2_utils.py
+index e16caae..0dc502f 100644
+--- a/sam2/modeling/sam2_utils.py
++++ b/sam2/modeling/sam2_utils.py
+@@ -6,6 +6,7 @@
+ 
+ 
+ import copy
++import os
+ from typing import Tuple
+ 
+ import numpy as np
+@@ -136,6 +137,9 @@ class MLP(nn.Module):
+         return x
+ 
+ 
++_OPT_4 = os.environ.get("SAM2_OPT_1", "1") != "0"
++
++
+ # From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
+ # Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
+ class LayerNorm2d(nn.Module):
+@@ -146,6 +150,9 @@ class LayerNorm2d(nn.Module):
+         self.eps = eps
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
++        if _OPT_4:
++            y = F.layer_norm(x.permute(0, 2, 3, 1), (x.shape[1],), self.weight, self.bias, self.eps)
++            return y.permute(0, 3, 1, 2).to(x.dtype)
+         u = x.mean(1, keepdim=True)
+         s = (x - u).pow(2).mean(1, keepdim=True)
+         x = (x - u) / torch.sqrt(s + self.eps)
+diff --git a/sam2/utils/misc.py b/sam2/utils/misc.py
+index b65ee82..b3cc054 100644
+--- a/sam2/utils/misc.py
++++ b/sam2/utils/misc.py
+@@ -264,6 +264,26 @@ def load_video_frames_from_jpg_images(
+         )
+         return lazy_images, lazy_images.video_height, lazy_images.video_width
+ 
++    if not offload_video_to_cpu and os.environ.get("SAM2_OPT_2", "1") != "0":
++        from concurrent.futures import ThreadPoolExecutor
++
++        def _decode(path):
++            img_pil = Image.open(path)
++            arr = np.array(img_pil.convert("RGB").resize((image_size, image_size)))
++            if arr.dtype != np.uint8:
++                raise RuntimeError(f"Unknown image dtype: {arr.dtype} on {path}")
++            return torch.from_numpy(arr), img_pil.size
++
++        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
++            decoded = list(pool.map(_decode, img_paths))
++        video_width, video_height = decoded[0][1]
++        images = torch.stack([d[0] for d in decoded]).pin_memory()
++        images = images.to(compute_device, non_blocking=True)
++        images = images.permute(0, 3, 1, 2).float().div_(255.0)
++        images -= img_mean.to(compute_device)
++        images /= img_std.to(compute_device)
++        return images, video_height, video_width
++
+     images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
+     for n, img_path in enumerate(tqdm(img_paths, desc="frame loading (JPEG)")):
+         images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
+diff --git a/tools/vos_inference.py b/tools/vos_inference.py
+index ef3e8c6..e24beeb 100644
+--- a/tools/vos_inference.py
++++ b/tools/vos_inference.py
+@@ -7,6 +7,7 @@
+ import argparse
+ import os
+ from collections import defaultdict
++from concurrent.futures import ThreadPoolExecutor
+ 
+ import numpy as np
+ import torch
+@@ -221,6 +222,40 @@ def vos_inference(
+     os.makedirs(os.path.join(output_mask_dir, video_name), exist_ok=True)
+     output_palette = input_palette or DAVIS_PALETTE
+     video_segments = {}  # video_segments contains the per-frame segmentation results
++    if not per_obj_png_file and os.environ.get("SAM2_OPT_3", "1") != "0":
++        label_maps = {}
++        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
++            inference_state
++        ):
++            label = torch.zeros(
++                (height, width), dtype=torch.uint8, device=out_mask_logits.device
++            )
++            for i, out_obj_id in sorted(
++                enumerate(out_obj_ids), key=lambda t: t[1], reverse=True
++            ):
++                label.masked_fill_(
++                    out_mask_logits[i].reshape(height, width) > score_thresh, out_obj_id
++                )
++            label_maps[out_frame_idx] = label
++        frame_inds = sorted(label_maps)
++        labels = torch.stack([label_maps[i] for i in frame_inds]).cpu().numpy()
++        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
++            list(
++                pool.map(
++                    lambda j: save_ann_png(
++                        os.path.join(
++                            output_mask_dir,
++                            video_name,
++                            f"{frame_names[frame_inds[j]]}.png",
++                        ),
++                        labels[j],
++                        output_palette,
++                    ),
++                    range(len(frame_inds)),
++                )
++            )
++        return
++
+     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(
+         inference_state
+     ):
